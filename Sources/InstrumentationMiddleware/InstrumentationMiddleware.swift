@@ -1,7 +1,7 @@
 import os.signpost
 import SwiftRex
 
-public class InstrumentationMiddleware<M: Middleware>: Middleware {
+public class InstrumentationMiddleware<M: MiddlewareProtocol>: MiddlewareProtocol {
     public let middleware: M
     private let prefix: String
     private let log: OSLog
@@ -13,51 +13,56 @@ public class InstrumentationMiddleware<M: Middleware>: Middleware {
         self.log = log
     }
 
-    public func receiveContext(getState: @escaping GetState<M.StateType>, output: AnyActionHandler<M.OutputActionType>) {
-        self.storeOutput = output
-        let proxiedOutput = AnyActionHandler<M.OutputActionType>.init { [weak self] action, source in
-            output.dispatch(action, from: source)
-
-            guard let self = self, self.log.signpostsEnabled else { return }
-            os_signpost(
-                .event,
-                log: self.log,
-                name: "Middleware Effect", "%sOutput %s from %s",
-                self.prefix,
-                debugCaseOutput(action),
-                [source.file, String(source.line), source.info].compactMap { $0 }.joined(separator: ":")
-            )
-        }
-        self.middleware.receiveContext(getState: getState, output: proxiedOutput)
-    }
-
-    public func handle(action: M.InputActionType, from dispatcher: ActionSource, afterReducer: inout AfterReducer) {
+    public func handle(action: M.InputActionType, from dispatcher: ActionSource, state: @escaping GetState<M.StateType>) -> IO<M.OutputActionType> {
         let log = self.log
         guard log.signpostsEnabled else {
-            self.middleware.handle(action: action, from: dispatcher, afterReducer: &afterReducer)
-            return
+            return self.middleware.handle(action: action, from: dispatcher, state: state)
         }
 
         let zeroWidthSpace = "\u{200B}"
         let prefix = self.prefix.isEmpty ? zeroWidthSpace : "[\(self.prefix)] "
-
         let actionOutput = debugCaseOutput(action)
-        if log.signpostsEnabled {
-            os_signpost(.begin, log: log, name: "Action", "%s%s", prefix, actionOutput)
+
+        let start = IO<M.OutputActionType> { _ in
+            if log.signpostsEnabled {
+                os_signpost(.begin, log: log, name: "Action", "%s%s", prefix, actionOutput)
+            }
         }
 
-        var innerMiddlewareAfterReducer: AfterReducer = .doNothing()
-        self.middleware.handle(action: action, from: dispatcher, afterReducer: &innerMiddlewareAfterReducer)
-
-        afterReducer = .do {
+        let end = IO<M.OutputActionType> { _ in
             if log.signpostsEnabled {
                 os_signpost(.end, log: log, name: "Action")
             }
-        } <> innerMiddlewareAfterReducer
+        }
+
+        let innerIO =
+            middleware
+                .handle(action: action, from: dispatcher, state: state)
+                .flatMap { (dispatchedAction: DispatchedAction<OutputActionType>) -> IO<OutputActionType> in
+                    // Inner middleware IO will dispatch actions, we intercept these actions to perform
+                    // the os_signpost side-effect, and immediately forward the original action to the store.
+                    IO { output in
+                        os_signpost(
+                            .event,
+                            log: self.log,
+                            name: "Middleware Effect", "%sOutput %s from %s",
+                            self.prefix,
+                            debugCaseOutput(action),
+                            [
+                                dispatchedAction.dispatcher.file,
+                                String(dispatchedAction.dispatcher.line),
+                                dispatchedAction.dispatcher.info
+                            ].compactMap { $0 }.joined(separator: ":")
+                        )
+
+                        output.dispatch(dispatchedAction)
+                    }
+                }
+        return start <> innerIO <> end
     }
 }
 
-extension Middleware {
+extension MiddlewareProtocol {
     public func signpost(
         prefix: String = "",
         log: OSLog = OSLog(subsystem: "de.developercity.swiftrex", category: "SwiftRex Middleware")

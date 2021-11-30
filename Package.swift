@@ -1,4 +1,4 @@
-// swift-tools-version:5.2
+// swift-tools-version:5.4
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -10,7 +10,7 @@ let package = Package(
         .library(name: "InstrumentationMiddleware", targets: ["InstrumentationMiddleware"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SwiftRex/SwiftRex.git", from: "0.7.1")
+        .package(url: "https://github.com/SwiftRex/SwiftRex.git", from: "0.8.8")
     ],
     targets: [
         .target(
